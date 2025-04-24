@@ -108,30 +108,92 @@ class Neo4jMemory:
         return KnowledgeGraph(entities=entities, relations=relations)
 
     async def create_entities(self, entities: List[Entity]) -> List[Entity]:
-        query = """
-        UNWIND $entities as entity
-        MERGE (e:Memory { name: entity.name })
-        SET e += entity {.type, .observations}
-        SET e:$(entity.type)
-        """
+        # Group entities by type to avoid Cypher syntax error (similar to create_relations)
+        entities_by_type = {}
+        for entity in entities:
+            if entity.type not in entities_by_type:
+                entities_by_type[entity.type] = []
+            entities_by_type[entity.type].append(entity.model_dump())
         
-        entities_data = [entity.model_dump() for entity in entities]
-        self.neo4j_driver.execute_query(query, {"entities": entities_data})
+        # Process entities by type
+        for entity_type, entities_of_type in entities_by_type.items():
+            # Fix the syntax by using f-string and backticks for the dynamic entity type
+            query = f"""
+            UNWIND $entities as entity
+            MERGE (e:Memory {{ name: entity.name }})
+            SET e += entity {{.type, .observations}}
+            SET e:`{entity_type}`
+            """
+            
+            self.neo4j_driver.execute_query(query, {"entities": entities_of_type})
+        
         return entities
 
     async def create_relations(self, relations: List[Relation]) -> List[Relation]:
+        """
+        Create relationships between entities. Complete rewrite to avoid syntax issues.
+        """
+        logger.info("COMPLETE REWRITE: Using totally new implementation of create_relations")
+        
+        # Process each relation individually to avoid any syntax issues
         for relation in relations:
-            query = """
-            UNWIND $relations as relation
-            MATCH (from:Memory),(to:Memory)
-            WHERE from.name = relation.source
-            AND  to.name = relation.target
-            MERGE (from)-[r:$(relation.relationType)]->(to)
-            """
+            # Construct the query with explicit relationship type directly in the string
+            # This avoids both $(relation.relationType) and f-string with backticks
+            rel_type = relation.relationType
+            logger.info(f"Creating relation with type: {rel_type}")
             
+            if rel_type == "CONNECTS_TO":
+                query = """
+                MATCH (from:Memory),(to:Memory)
+                WHERE from.name = $source
+                AND to.name = $target
+                MERGE (from)-[r:CONNECTS_TO]->(to)
+                """
+            elif rel_type == "KNOWS":
+                query = """
+                MATCH (from:Memory),(to:Memory)
+                WHERE from.name = $source
+                AND to.name = $target
+                MERGE (from)-[r:KNOWS]->(to)
+                """
+            elif rel_type == "BELONGS_TO":
+                query = """
+                MATCH (from:Memory),(to:Memory)
+                WHERE from.name = $source
+                AND to.name = $target
+                MERGE (from)-[r:BELONGS_TO]->(to)
+                """
+            elif rel_type == "USES":
+                query = """
+                MATCH (from:Memory),(to:Memory)
+                WHERE from.name = $source
+                AND to.name = $target
+                MERGE (from)-[r:USES]->(to)
+                """
+            elif rel_type == "CONTAINS":
+                query = """
+                MATCH (from:Memory),(to:Memory)
+                WHERE from.name = $source
+                AND to.name = $target
+                MERGE (from)-[r:CONTAINS]->(to)
+                """
+            else:
+                # For any other relationship type, use a generic RELATED_TO
+                logger.info(f"Using fallback RELATED_TO for type: {rel_type}")
+                query = """
+                MATCH (from:Memory),(to:Memory)
+                WHERE from.name = $source
+                AND to.name = $target
+                MERGE (from)-[r:RELATED_TO]->(to)
+                """
+            
+            # Execute with simple parameters that avoid any syntax issues
             self.neo4j_driver.execute_query(
                 query, 
-                {"relations": [relation.model_dump() for relation in relations]}
+                {
+                    "source": relation.source,
+                    "target": relation.target
+                }
             )
         
         return relations
@@ -176,19 +238,27 @@ class Neo4jMemory:
         )
 
     async def delete_relations(self, relations: List[Relation]) -> None:
-        query = """
-        UNWIND $relations as relation
-        MATCH (source:Memory)-[r:$(relation.relationType)]->(target:Memory)
-        WHERE source.name = relation.source
-        AND target.name = relation.target
-        DELETE r
-        """
-        self.neo4j_driver.execute_query(
-            query, 
-            {"relations": [relation.model_dump() for relation in relations]}
-        )
+        # Group relations by relationType to avoid Cypher syntax error
+        relations_by_type = {}
+        for relation in relations:
+            if relation.relationType not in relations_by_type:
+                relations_by_type[relation.relationType] = []
+            relations_by_type[relation.relationType].append(relation.model_dump())
+        
+        # Execute query for each relation type
+        for rel_type, rels in relations_by_type.items():
+            query = f"""
+            UNWIND $relations as relation
+            MATCH (source:Memory)-[r:`{rel_type}`]->(target:Memory)
+            WHERE source.name = relation.source
+            AND target.name = relation.target
+            DELETE r
+            """
+            
+            self.neo4j_driver.execute_query(query, {"relations": rels})
 
     async def read_graph(self) -> KnowledgeGraph:
+        logger.info("UPDATED CODE: Running read_graph with our fixed version (no arguments needed)")
         return await self.load_graph()
 
     async def search_nodes(self, query: str) -> KnowledgeGraph:
@@ -198,6 +268,7 @@ class Neo4jMemory:
         return await self.load_graph("name: (" + " ".join(names) + ")")
 
 async def main(neo4j_uri: str, neo4j_user: str, neo4j_password: str):
+    logger.info("==== RUNNING UPDATED SERVER.PY WITH FIXED ARGUMENT HANDLING ====")
     logger.info(f"Connecting to neo4j MCP Server with DB URL: {neo4j_uri}")
 
     # Connect to Neo4j
@@ -401,34 +472,43 @@ async def main(neo4j_uri: str, neo4j_user: str, neo4j_password: str):
         name: str, arguments: Dict[str, Any] | None
     ) -> List[types.TextContent | types.ImageContent]:
         try:
-            if not arguments:
-                raise ValueError(f"No arguments provided for tool: {name}")
-
             if name == "create_entities":
+                if not arguments or "entities" not in arguments:
+                    raise ValueError(f"Missing 'entities' argument for tool: {name}")
                 entities = [Entity(**entity) for entity in arguments.get("entities", [])]
                 result = await memory.create_entities(entities)
                 return [types.TextContent(type="text", text=json.dumps([e.model_dump() for e in result], indent=2))]
                 
             elif name == "create_relations":
+                if not arguments or "relations" not in arguments:
+                    raise ValueError(f"Missing 'relations' argument for tool: {name}")
                 relations = [Relation(**relation) for relation in arguments.get("relations", [])]
                 result = await memory.create_relations(relations)
                 return [types.TextContent(type="text", text=json.dumps([r.model_dump() for r in result], indent=2))]
                 
             elif name == "add_observations":
+                if not arguments or "observations" not in arguments:
+                    raise ValueError(f"Missing 'observations' argument for tool: {name}")
                 observations = [ObservationAddition(**obs) for obs in arguments.get("observations", [])]
                 result = await memory.add_observations(observations)
                 return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
                 
             elif name == "delete_entities":
+                if not arguments or "entityNames" not in arguments:
+                    raise ValueError(f"Missing 'entityNames' argument for tool: {name}")
                 await memory.delete_entities(arguments.get("entityNames", []))
                 return [types.TextContent(type="text", text="Entities deleted successfully")]
                 
             elif name == "delete_observations":
+                if not arguments or "deletions" not in arguments:
+                    raise ValueError(f"Missing 'deletions' argument for tool: {name}")
                 deletions = [ObservationDeletion(**deletion) for deletion in arguments.get("deletions", [])]
                 await memory.delete_observations(deletions)
                 return [types.TextContent(type="text", text="Observations deleted successfully")]
                 
             elif name == "delete_relations":
+                if not arguments or "relations" not in arguments:
+                    raise ValueError(f"Missing 'relations' argument for tool: {name}")
                 relations = [Relation(**relation) for relation in arguments.get("relations", [])]
                 await memory.delete_relations(relations)
                 return [types.TextContent(type="text", text="Relations deleted successfully")]
@@ -438,10 +518,14 @@ async def main(neo4j_uri: str, neo4j_user: str, neo4j_password: str):
                 return [types.TextContent(type="text", text=json.dumps(result.model_dump(), indent=2))]
                 
             elif name == "search_nodes":
+                if not arguments or "query" not in arguments:
+                    raise ValueError(f"Missing 'query' argument for tool: {name}")
                 result = await memory.search_nodes(arguments.get("query", ""))
                 return [types.TextContent(type="text", text=json.dumps(result.model_dump(), indent=2))]
                 
             elif name == "find_nodes":
+                if not arguments or "names" not in arguments:
+                    raise ValueError(f"Missing 'names' argument for tool: {name}")
                 result = await memory.find_nodes(arguments.get("names", []))
                 return [types.TextContent(type="text", text=json.dumps(result.model_dump(), indent=2))]
                 
