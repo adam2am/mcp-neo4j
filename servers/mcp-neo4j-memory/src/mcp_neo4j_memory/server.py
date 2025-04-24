@@ -131,70 +131,48 @@ class Neo4jMemory:
 
     async def create_relations(self, relations: List[Relation]) -> List[Relation]:
         """
-        Create relationships between entities. Complete rewrite to avoid syntax issues.
+        Create relationships between entities using APOC for dynamic relationship types.
+        Requires APOC plugin to be installed.
         """
-        logger.info("COMPLETE REWRITE: Using totally new implementation of create_relations")
+        logger.info("Using APOC's apoc.create.relationship for dynamic relation creation.")
         
-        # Process each relation individually to avoid any syntax issues
+        # Process each relation individually using APOC
         for relation in relations:
-            # Construct the query with explicit relationship type directly in the string
-            # This avoids both $(relation.relationType) and f-string with backticks
-            rel_type = relation.relationType
-            logger.info(f"Creating relation with type: {rel_type}")
+            query = """
+            MATCH (from:Memory {name: $source}), (to:Memory {name: $target})
+            CALL apoc.create.relationship(from, $rel_type, {}, to) YIELD rel
+            RETURN type(rel) as created_relation_type
+            """
             
-            if rel_type == "CONNECTS_TO":
-                query = """
-                MATCH (from:Memory),(to:Memory)
-                WHERE from.name = $source
-                AND to.name = $target
-                MERGE (from)-[r:CONNECTS_TO]->(to)
-                """
-            elif rel_type == "KNOWS":
-                query = """
-                MATCH (from:Memory),(to:Memory)
-                WHERE from.name = $source
-                AND to.name = $target
-                MERGE (from)-[r:KNOWS]->(to)
-                """
-            elif rel_type == "BELONGS_TO":
-                query = """
-                MATCH (from:Memory),(to:Memory)
-                WHERE from.name = $source
-                AND to.name = $target
-                MERGE (from)-[r:BELONGS_TO]->(to)
-                """
-            elif rel_type == "USES":
-                query = """
-                MATCH (from:Memory),(to:Memory)
-                WHERE from.name = $source
-                AND to.name = $target
-                MERGE (from)-[r:USES]->(to)
-                """
-            elif rel_type == "CONTAINS":
-                query = """
-                MATCH (from:Memory),(to:Memory)
-                WHERE from.name = $source
-                AND to.name = $target
-                MERGE (from)-[r:CONTAINS]->(to)
-                """
-            else:
-                # For any other relationship type, use a generic RELATED_TO
-                logger.info(f"Using fallback RELATED_TO for type: {rel_type}")
-                query = """
-                MATCH (from:Memory),(to:Memory)
-                WHERE from.name = $source
-                AND to.name = $target
-                MERGE (from)-[r:RELATED_TO]->(to)
-                """
+            params = {
+                "source": relation.source,
+                "target": relation.target,
+                "rel_type": relation.relationType  # Pass the type as a parameter
+            }
             
-            # Execute with simple parameters that avoid any syntax issues
-            self.neo4j_driver.execute_query(
-                query, 
-                {
-                    "source": relation.source,
-                    "target": relation.target
-                }
-            )
+            try:
+                # Execute the query using APOC
+                result = self.neo4j_driver.execute_query(query, params)
+                # Optional: Log the result or check if the relation was created
+                if result.records:
+                    created_type = result.records[0].get("created_relation_type")
+                    logger.debug(f"Created relation '{relation.source}' -[{created_type}]-> '{relation.target}'")
+                else:
+                    logger.warning(f"Could not create relation: {relation.source} -[{relation.relationType}]-> {relation.target}. Nodes might not exist.")
+            except neo4j.exceptions.ClientError as e:
+                # Handle potential errors, e.g., APOC procedure not found
+                if "There is no procedure with the name `apoc.create.relationship`" in str(e):
+                    logger.error("APOC procedure 'apoc.create.relationship' not found. Ensure APOC plugin is installed and the database restarted.")
+                    # Potentially re-raise or handle more gracefully
+                    raise e 
+                else:
+                    logger.error(f"Failed to create relation {relation.source} -> {relation.target}: {e}")
+                    # Re-raise other client errors
+                    raise e
+            except Exception as e:
+                logger.error(f"An unexpected error occurred during relation creation: {e}")
+                # Re-raise unexpected errors
+                raise e
         
         return relations
 
